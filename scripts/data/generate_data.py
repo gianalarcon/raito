@@ -26,6 +26,8 @@ FAST = False
 RETRIES = 3
 DELAY = 2
 
+MMR_ROOTS_DIR = f"{os.path.dirname(os.path.realpath(__file__))}/.mmr_data/roots"
+
 
 def request_rpc(method: str, params: list):
     """Makes a JSON-RPC call to a Bitcoin API endpoint.
@@ -309,6 +311,14 @@ def next_chain_state(current_state: dict, new_block: dict) -> dict:
     return next_state
 
 
+def read_block_mmr_roots(height):
+    shard_size = 10000
+    shard_name = (height // shard_size + 1) * shard_size
+    mmr_roots_file = Path(MMR_ROOTS_DIR) / str(shard_name) / f"block_{height}.json"
+    with open(mmr_roots_file, "r") as f:
+        return json.load(f)
+
+
 def generate_data(
     mode: str,
     initial_height: int,
@@ -396,6 +406,7 @@ def generate_data(
     result = {
         "chain_state": format_chain_state(initial_chain_state),
         "blocks": list(map(block_formatter, blocks)),
+        "mmr_roots": read_block_mmr_roots(initial_height),
         "expected": format_chain_state(chain_state),
     }
 

@@ -3,6 +3,7 @@
 //! The data is expected to be prepared in advance and passed as program arguments.
 
 use core::fmt::{Display, Error, Formatter};
+use utils::blake2s_hasher::{Blake2sDigest, Blake2sHasher};
 use utils::double_sha256::double_sha256_word_array;
 use utils::hash::Digest;
 use utils::word_array::{WordArray, WordArrayTrait};
@@ -68,6 +69,23 @@ pub impl BlockHashImpl of BlockHash {
 
         double_sha256_word_array(words)
     }
+
+    /// Computes the Blake2s digest of the block header.
+    fn blake2s_digest(
+        self: @Header, prev_block_hash: Digest, merkle_root: Digest,
+    ) -> Blake2sDigest {
+        let mut hasher = Blake2sHasher::new();
+        let [v1, v2, v3, v4, v5, v6, v7, v8] = prev_block_hash.value;
+        let [v9, v10, v11, v12, v13, v14, v15, v16] = merkle_root.value;
+        hasher
+            .compress_block(
+                [*self.version, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15],
+            );
+        hasher
+            .finalize_block(
+                [v16, *self.time, *self.bits, *self.nonce, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 16,
+            )
+    }
 }
 
 /// `Default` trait implementation of `TransactionData`, i.e., empty transaction data.
@@ -120,6 +138,7 @@ impl TransactionDataDisplay of Display<TransactionData> {
 
 #[cfg(test)]
 mod tests {
+    use utils::blake2s_hasher::Blake2sDigestIntoU256;
     use utils::hash::Digest;
     use crate::types::chain_state::ChainState;
     use super::{BlockHash, Header};
@@ -195,5 +214,21 @@ mod tests {
             .into();
 
         assert_ne!(expected_block_hash, block_hash_result);
+    }
+
+    #[test]
+    fn test_block_hash_blake2s() {
+        let header = Header {
+            version: 1_u32, time: 1231731025_u32, bits: 0x1d00ffff_u32, nonce: 1889418792_u32,
+        };
+        let merkle_root = 0x7dac2c5666815c17a3b36427de37bb9d2e2c5ccec3f8633eb91a4205cb4c10ff_u256
+            .into();
+        let best_block_hash =
+            0x000000002a22cfee1f2c846adbd12b3e183d4f97683f85dad08a79780a84bd55_u256
+            .into();
+        let block_hash_result: u256 = header.blake2s_digest(best_block_hash, merkle_root).into();
+        let expected_block_hash =
+            0x50b005dd2964720fcd066875bc1cf13a06703a5c8efe8b02a1fd7ea902050f09_u256;
+        assert_eq!(expected_block_hash, block_hash_result);
     }
 }

@@ -321,7 +321,7 @@ def prove_batch(height, step, fast_data_generation=True):
                 if previous_proof_file.exists():
                     break
 
-        logger.debug(f"{job_info} generating data...")
+        logger.debug(f"{job_info} generating data (fast: {fast_data_generation})...")
 
         args_start_time = time.time()
 
@@ -333,6 +333,7 @@ def prove_batch(height, step, fast_data_generation=True):
         batch_args = {
             "chain_state": batch_data["chain_state"],
             "blocks": batch_data["blocks"],
+            "block_mmr": batch_data["mmr_roots"],
         }
         batch_file.write_text(json.dumps(batch_args, indent=2))
 
