@@ -1,3 +1,5 @@
+//! Sparse roots representation and file sink for MMR peaks compatible with Cairo implementation.
+
 use num_bigint::BigInt;
 use num_traits::Num;
 use serde::{Serialize, Serializer};
@@ -7,38 +9,45 @@ use std::str::FromStr;
 use tokio::fs;
 use tracing::{debug, info};
 
+/// Configuration for the sparse roots sink
 #[derive(Debug, Clone)]
 pub struct SparseRootsSinkConfig {
-    pub output_dir: String,
+    /// Output directory for the sparse roots JSON files
+    pub output_dir: PathBuf,
+    /// Shard size for the sparse roots JSON files
     pub shard_size: u32,
 }
 
+/// Sparse roots is MMR peaks for all heights, where missing ones are filled with zeros
+/// This representation is different from the "compact" one, which contains only non-zero peaks
+/// but with total number of elements.
 #[derive(Debug, Clone, Serialize)]
 pub struct SparseRoots {
+    /// Block height
     #[serde(skip)]
     pub block_height: u32,
-    #[serde(serialize_with = "serialize_bigint_vec")]
+    /// MMR peaks for all heights, where missing ones are filled with zeros
+    #[serde(serialize_with = "serialize_u256_array")]
     pub roots: Vec<String>,
 }
 
+/// Sink for writing sparse roots to a JSON file
 pub struct SparseRootsSink {
     config: SparseRootsSinkConfig,
-    output_dir: PathBuf,
 }
 
 impl SparseRootsSink {
+    /// Create a new sparse roots sink with the given configuration
     pub async fn new(config: SparseRootsSinkConfig) -> Result<Self, anyhow::Error> {
-        let output_dir = PathBuf::from(&config.output_dir);
-
         // Create the output directory if it doesn't exist
-        fs::create_dir_all(&output_dir).await?;
+        fs::create_dir_all(&config.output_dir).await?;
 
         info!(
             "SparseRootsSink initialized with output_dir: {:?}, shard_size: {}",
-            output_dir, config.shard_size
+            config.output_dir, config.shard_size
         );
 
-        Ok(Self { config, output_dir })
+        Ok(Self { config })
     }
 
     /// Calculate the shard directory path for a given block height
@@ -47,7 +56,7 @@ impl SparseRootsSink {
         let shard_start = shard_id * self.config.shard_size;
         let shard_end = shard_start + self.config.shard_size;
         let shard_dir_name = format!("{shard_end}");
-        self.output_dir.join(shard_dir_name)
+        self.config.output_dir.join(shard_dir_name)
     }
 
     /// Get the file path for a specific block height
@@ -84,8 +93,8 @@ impl SparseRootsSink {
     }
 }
 
-// Custom serialization for Vec<String> to serialize as integers
-fn serialize_bigint_vec<S>(items: &Vec<String>, serializer: S) -> Result<S::Ok, S::Error>
+// Custom serialization for Vec<String> to serialize as array of u256 (in Cairo)
+fn serialize_u256_array<S>(items: &Vec<String>, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
 {
@@ -113,6 +122,8 @@ where
     seq.end()
 }
 
+/// Convert a hex string to a JSON number
+/// What we are doing here is making sure we get `{"key": 123123}` instead of `{"key": "123123"}`
 fn num_str_to_json_number<S>(num_str: &str) -> Result<serde_json::Number, S::Error>
 where
     S: Serializer,

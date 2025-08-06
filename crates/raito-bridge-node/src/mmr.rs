@@ -1,15 +1,22 @@
+//! Merkle Mountain Range (MMR) accumulator implementation for Bitcoin block headers with proof generation.
+
 use std::path::Path;
 use std::sync::Arc;
 use tokio::fs;
 
 use accumulators::hasher::stark_blake::StarkBlakeHasher;
 use accumulators::hasher::Hasher;
-use accumulators::mmr::{PeaksOptions, MMR};
+use accumulators::mmr::{
+    elements_count_to_leaf_count, map_leaf_index_to_element_index, PeaksOptions, MMR,
+};
 use accumulators::store::memory::InMemoryStore;
 use accumulators::store::sqlite::SQLiteStore;
 use accumulators::store::Store;
 use bitcoin::block::Header as BlockHeader;
 use bitcoin::hashes::Hash;
+use serde::{Deserialize, Serialize};
+
+use crate::sparse_roots::SparseRoots;
 
 /// MMR accumulator state
 #[derive(Debug)]
@@ -20,6 +27,16 @@ pub struct Accumulator {
     mmr: MMR,
 }
 
+/// Proof data structure for demonstrating inclusion of a block in the MMR
+#[derive(Debug, Serialize, Deserialize)]
+pub struct InclusionProof {
+    /// MMR peak hashes at the time of proof generation
+    roots: Vec<String>,
+    /// Sibling hashes needed to reconstruct the path to the root
+    siblings: Vec<String>,
+}
+
+/// Default accumulator is an in-memory accumulator with StarkBlake hasher
 impl Default for Accumulator {
     fn default() -> Self {
         let store = Arc::new(InMemoryStore::default());
@@ -53,11 +70,13 @@ impl Accumulator {
         Ok(())
     }
 
+    /// Add a block header to the MMR
     pub async fn add_block_header(&mut self, block_header: BlockHeader) -> anyhow::Result<()> {
         let leaf = block_header_digest(self.hasher.clone(), block_header)?;
         self.add(leaf).await
     }
 
+    /// Get the number of blocks in the MMR (number of leaves)
     pub async fn get_block_count(&self) -> anyhow::Result<u32> {
         self.mmr
             .leaves_count
@@ -68,8 +87,10 @@ impl Accumulator {
     }
 
     /// Get the roots of the MMR in sparse format (compatible with Cairo implementation)
-    pub async fn get_sparse_roots(&self) -> anyhow::Result<Vec<String>> {
+    pub async fn get_sparse_roots(&self) -> anyhow::Result<SparseRoots> {
         let mut elements_count = self.mmr.elements_count.get().await?;
+        let block_count = elements_count_to_leaf_count(elements_count)?;
+
         let roots = self
             .mmr
             .get_peaks(PeaksOptions {
@@ -103,10 +124,37 @@ impl Accumulator {
             result.push(null_root);
         }
 
-        Ok(result)
+        Ok(SparseRoots {
+            roots: result,
+            // Last block height is the number of leaves - 1
+            block_height: block_count as u32 - 1,
+        })
+    }
+
+    /// Generate an inclusion proof for a given block height
+    pub async fn generate_proof(&self, block_height: u32) -> anyhow::Result<InclusionProof> {
+        let element_index = map_leaf_index_to_element_index(block_height as usize);
+        let proof = self
+            .mmr
+            .get_proof(element_index, None)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to generate proof: {}", e))?;
+        Ok(InclusionProof {
+            roots: proof.peaks_hashes,
+            siblings: proof.siblings_hashes,
+        })
     }
 }
 
+/// Compute the digest of a block header using the specified hasher
+///
+/// # Arguments
+/// * `hasher` - The hasher implementation to use
+/// * `block_header` - The Bitcoin block header to hash
+///
+/// # Returns
+/// * `String` - The hex-encoded hash digest
+/// * `anyhow::Error` - If hashing fails
 pub fn block_header_digest(
     hasher: Arc<dyn Hasher>,
     block_header: BlockHeader,
@@ -138,8 +186,12 @@ mod tests {
 
         // Add first leaf
         mmr.add(leaf.clone()).await.unwrap();
-        let roots = mmr.get_sparse_roots().await.unwrap();
+        let SparseRoots {
+            block_height,
+            roots,
+        } = mmr.get_sparse_roots().await.unwrap();
         assert_eq!(roots.len(), 2);
+        assert_eq!(block_height, 0);
         assert_eq!(
             roots[0],
             "0xc713e33d89122b85e2f646cc518c2e6ef88b06d3b016104faa95f84f878dab66"
@@ -151,8 +203,12 @@ mod tests {
 
         // Add second leaf
         mmr.add(leaf.clone()).await.unwrap();
-        let roots = mmr.get_sparse_roots().await.unwrap();
+        let SparseRoots {
+            block_height,
+            roots,
+        } = mmr.get_sparse_roots().await.unwrap();
         assert_eq!(roots.len(), 3);
+        assert_eq!(block_height, 1);
         assert_eq!(
             roots[0],
             "0x0000000000000000000000000000000000000000000000000000000000000000"
@@ -168,8 +224,12 @@ mod tests {
 
         // Add third leaf
         mmr.add(leaf.clone()).await.unwrap();
-        let roots = mmr.get_sparse_roots().await.unwrap();
+        let SparseRoots {
+            block_height,
+            roots,
+        } = mmr.get_sparse_roots().await.unwrap();
         assert_eq!(roots.len(), 3);
+        assert_eq!(block_height, 2);
         assert_eq!(
             roots[0],
             "0xc713e33d89122b85e2f646cc518c2e6ef88b06d3b016104faa95f84f878dab66"
@@ -185,8 +245,12 @@ mod tests {
 
         // Add fourth leaf
         mmr.add(leaf.clone()).await.unwrap();
-        let roots = mmr.get_sparse_roots().await.unwrap();
+        let SparseRoots {
+            block_height,
+            roots,
+        } = mmr.get_sparse_roots().await.unwrap();
         assert_eq!(roots.len(), 4);
+        assert_eq!(block_height, 3);
         assert_eq!(
             roots[0],
             "0x0000000000000000000000000000000000000000000000000000000000000000"
@@ -206,8 +270,12 @@ mod tests {
 
         // Add fifth leaf
         mmr.add(leaf.clone()).await.unwrap();
-        let roots = mmr.get_sparse_roots().await.unwrap();
+        let SparseRoots {
+            block_height,
+            roots,
+        } = mmr.get_sparse_roots().await.unwrap();
         assert_eq!(roots.len(), 4);
+        assert_eq!(block_height, 4);
         assert_eq!(
             roots[0],
             "0xc713e33d89122b85e2f646cc518c2e6ef88b06d3b016104faa95f84f878dab66"
