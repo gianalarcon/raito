@@ -6,7 +6,10 @@ use tokio::fs;
 
 use accumulators::hasher::stark_blake::StarkBlakeHasher;
 use accumulators::hasher::Hasher;
-use accumulators::mmr::{map_leaf_index_to_element_index, PeaksOptions, Proof, MMR};
+use accumulators::mmr::{
+    elements_count_to_leaf_count, leaf_count_to_mmr_size, map_leaf_index_to_element_index,
+    PeaksOptions, Proof, ProofOptions, MMR,
+};
 use accumulators::store::memory::InMemoryStore;
 use accumulators::store::sqlite::SQLiteStore;
 use accumulators::store::Store;
@@ -27,13 +30,13 @@ pub struct BlockMMR {
 
 /// Proof data structure for demonstrating inclusion of a block in the MMR
 #[derive(Debug, Serialize, Deserialize)]
-pub struct InclusionProof {
+pub struct BlockInclusionProof {
     /// MMR peak hashes at the time of proof generation
     pub peaks_hashes: Vec<String>,
     /// Sibling hashes needed to reconstruct the path to the root
     pub siblings_hashes: Vec<String>,
-    /// Total number of elements in the MMR
-    pub elements_count: usize,
+    /// Total number of leaves in the MMR
+    pub leaf_count: usize,
 }
 
 /// Default accumulator is an in-memory accumulator with StarkBlake hasher
@@ -67,7 +70,7 @@ impl BlockMMR {
     /// Create in-memory MMR from peaks hashes and elements count
     pub async fn from_peaks(
         peaks_hashes: Vec<String>,
-        elements_count: usize,
+        leaf_count: usize,
     ) -> Result<Self, anyhow::Error> {
         let store = Arc::new(InMemoryStore::default());
         let hasher = Arc::new(StarkBlakeHasher::default());
@@ -76,7 +79,7 @@ impl BlockMMR {
             hasher.clone(),
             None,
             peaks_hashes,
-            elements_count,
+            leaf_count_to_mmr_size(leaf_count),
         )
         .await?;
         Ok(Self { hasher, store, mmr })
@@ -117,18 +120,28 @@ impl BlockMMR {
         SparseRoots::try_from_peaks(roots, elements_count)
     }
 
-    /// Generate an inclusion proof for a given block height
-    pub async fn generate_proof(&self, block_height: u32) -> anyhow::Result<InclusionProof> {
+    /// Generate an inclusion proof for a given block height.
+    /// If `block_count` is provided, the proof will be generated for a previous state of the MMR.
+    pub async fn generate_proof(
+        &self,
+        block_height: u32,
+        block_count: Option<u32>,
+    ) -> anyhow::Result<BlockInclusionProof> {
         let element_index = map_leaf_index_to_element_index(block_height as usize);
+        let options = ProofOptions {
+            elements_count: block_count.map(|c| leaf_count_to_mmr_size(c as usize)),
+            ..Default::default()
+        };
         let proof = self
             .mmr
-            .get_proof(element_index, None)
+            .get_proof(element_index, Some(options))
             .await
             .map_err(|e| anyhow::anyhow!("Failed to generate proof: {}", e))?;
-        Ok(InclusionProof {
+        let leaf_count = elements_count_to_leaf_count(proof.elements_count)?;
+        Ok(BlockInclusionProof {
             peaks_hashes: proof.peaks_hashes,
             siblings_hashes: proof.siblings_hashes,
-            elements_count: proof.elements_count,
+            leaf_count,
         })
     }
 
@@ -139,19 +152,22 @@ impl BlockMMR {
         &self,
         block_height: u32,
         block_header: BlockHeader,
-        proof: InclusionProof,
+        proof: BlockInclusionProof,
     ) -> anyhow::Result<bool> {
         let element_hash = block_header_digest(self.hasher.clone(), block_header)?;
-        let element_index = map_leaf_index_to_element_index(block_height as usize);
         let proof = Proof {
-            element_index,
+            element_index: map_leaf_index_to_element_index(block_height as usize),
             element_hash: element_hash.clone(),
             siblings_hashes: proof.siblings_hashes,
             peaks_hashes: proof.peaks_hashes,
-            elements_count: proof.elements_count,
+            elements_count: leaf_count_to_mmr_size(proof.leaf_count),
+        };
+        let options = ProofOptions {
+            elements_count: Some(proof.elements_count),
+            ..Default::default()
         };
         self.mmr
-            .verify_proof(proof, element_hash, None)
+            .verify_proof(proof, element_hash, Some(options))
             .await
             .map_err(|e| anyhow::anyhow!("Failed to verify proof: {}", e))
     }
@@ -383,13 +399,22 @@ mod tests {
             mmr.add_block_header(block_header.clone()).await.unwrap();
         }
         // Generate a proof for the fifth block
-        let proof = mmr.generate_proof(5).await.unwrap();
+        let proof = mmr.generate_proof(5, None).await.unwrap();
         // Create an ephemeral MMR from the peaks hashes and elements count
-        let mmr = BlockMMR::from_peaks(proof.peaks_hashes.clone(), proof.elements_count)
+        let view_mmr = BlockMMR::from_peaks(proof.peaks_hashes.clone(), proof.leaf_count)
             .await
             .unwrap();
         // Verify the proof
-        assert!(mmr.verify_proof(5, block_header, proof).await.unwrap());
+        assert!(view_mmr.verify_proof(5, block_header, proof).await.unwrap());
+
+        // Generate a proof for a previous MMR state
+        let proof = mmr.generate_proof(1, Some(4)).await.unwrap();
+        // Create an ephemeral MMR from the peaks hashes and elements count
+        let view_mmr = BlockMMR::from_peaks(proof.peaks_hashes.clone(), proof.leaf_count)
+            .await
+            .unwrap();
+        // Verify the proof
+        assert!(view_mmr.verify_proof(1, block_header, proof).await.unwrap());
     }
 
     #[tokio::test]

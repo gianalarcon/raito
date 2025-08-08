@@ -5,16 +5,23 @@ use tokio::sync::broadcast;
 use tracing::{error, info};
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     routing::get,
     Json, Router,
 };
+use serde::Deserialize;
 use tower_http::trace::TraceLayer;
 
-use raito_spv_core::block_mmr::InclusionProof;
+use raito_spv_core::block_mmr::BlockInclusionProof;
 
 use crate::app::AppClient;
+
+/// Query parameters for block inclusion proof generation
+#[derive(Debug, Deserialize)]
+pub struct BlockProofQuery {
+    pub block_count: Option<u32>,
+}
 
 /// Configuration for the RPC server
 pub struct RpcConfig {
@@ -46,7 +53,7 @@ impl RpcServer {
         info!("Starting RPC server on {}", self.config.rpc_host);
 
         let app = Router::new()
-            .route("/proof/:height", get(generate_proof))
+            .route("/block-inclusion-proof/:height", get(generate_proof))
             .route("/head", get(get_head))
             .with_state(self.app_client.clone())
             .layer(TraceLayer::new_for_http());
@@ -84,9 +91,10 @@ impl RpcServer {
 pub async fn generate_proof(
     State(app_client): State<AppClient>,
     Path(height): Path<u32>,
-) -> Result<Json<InclusionProof>, StatusCode> {
+    Query(query): Query<BlockProofQuery>,
+) -> Result<Json<BlockInclusionProof>, StatusCode> {
     let proof = app_client
-        .generate_block_proof(height)
+        .generate_block_proof(height, query.block_count)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(proof))
