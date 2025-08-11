@@ -6,6 +6,7 @@ import argparse
 import logging
 import time
 import datetime
+import gzip
 from pathlib import Path
 from typing import Optional, Dict, Any
 import traceback
@@ -22,30 +23,12 @@ except ImportError:
 
 from generate_data import request_rpc
 from prove_pow import auto_detect_start, prove_pow
+from mmr import get_latest_block_height
 import logging_setup
 
 logger = logging.getLogger(__name__)
 
 GCS_BUCKET_NAME = os.getenv("GCS_BUCKET_NAME", "raito-proofs")
-
-BITCOIN_RPC = os.getenv("BITCOIN_RPC")
-USERPWD = os.getenv("USERPWD")
-DEFAULT_URL = "https://bitcoin-mainnet.public.blastapi.io"
-
-
-def get_latest_block_height() -> int:
-    """Get the latest block height from Bitcoin node API."""
-    try:
-        latest_hash = request_rpc("getbestblockhash", [])
-
-        block_info = request_rpc("getblock", [latest_hash])
-        height = block_info["height"]
-
-        logger.info(f"Latest block height: {height}")
-        return height
-    except Exception as e:
-        logger.error(f"Failed to get latest block height: {e}")
-        raise
 
 
 def convert_proof_to_json(proof_file: Path) -> Optional[Path]:
@@ -58,7 +41,7 @@ def convert_proof_to_json(proof_file: Path) -> Optional[Path]:
         Path to the converted JSON proof file, or None if conversion failed
     """
     json_proof_file = proof_file.parent / f"{proof_file.stem}_json{proof_file.suffix}"
-    logger.info(f"Converting proof from Cairo-serde format to JSON format...")
+    logger.debug(f"Converting proof from Cairo-serde format to JSON format...")
 
     try:
         import subprocess
@@ -91,10 +74,28 @@ def convert_proof_to_json(proof_file: Path) -> Optional[Path]:
         return None
 
 
-def upload_to_gcs(
-    proof_file: Path, chainstate_data: Dict[str, Any], mmr_roots: Dict[str, Any]
-) -> bool:
-    """Upload proof and chainstate data to Google Cloud Storage."""
+def compress_proof_data(proof_file: Path) -> Optional[Path]:
+    """Compress the proof data using gzip."""
+    compressed_proof_file = proof_file.parent / f"{proof_file.stem}_json.gz"
+    logger.debug(
+        f"Compressing proof data from {proof_file} to {compressed_proof_file}..."
+    )
+
+    try:
+        with open(proof_file, "rb") as f_in, gzip.open(
+            compressed_proof_file, "wb"
+        ) as f_out:
+            f_out.writelines(f_in)
+        logger.info(f"Successfully compressed proof data: {compressed_proof_file}")
+        return compressed_proof_file
+    except Exception as e:
+        logger.error(f"Failed to compress proof data: {e}")
+        logger.error(traceback.format_exc())
+        return None
+
+
+def upload_to_gcs(proof_file: Path, chainstate_data: Dict[str, Any]) -> bool:
+    """Upload compressed proof and chainstate data to Google Cloud Storage."""
     if storage is None:
         logger.error(
             "Google Cloud Storage not available. Please install google-cloud-storage package."
@@ -120,25 +121,35 @@ def upload_to_gcs(
 
         timestamp = datetime.datetime.now().isoformat()
 
+        # Read the compressed proof data
+        with gzip.open(proof_file, "rt") as f:
+            proof_content = json.load(f)
+
         upload_data = {
             "timestamp": timestamp,
             "chainstate": chainstate_data,
-            "mmr_roots": mmr_roots,
+            "proof": proof_content,
         }
 
-        with open(proof_file, "r") as f:
-            proof_content = json.load(f)
+        # Create filename without extension
+        filename = f"proof_{chainstate_data['block_height']}_{chainstate_data['best_block_hash']}"
 
-        upload_data["proof"] = proof_content
-
-        filename = f"proof_{chainstate_data['block_height']}_{chainstate_data['best_block_hash']}.json"
-
-        blob = bucket.blob(filename)
-        blob.upload_from_string(
-            json.dumps(upload_data, indent=2), content_type="application/json"
+        # Compress the entire upload data
+        compressed_data = gzip.compress(
+            json.dumps(upload_data, indent=2).encode("utf-8")
         )
 
-        logger.info(f"Successfully uploaded proof to GCS: {filename}")
+        blob = bucket.blob(filename)
+        blob.content_encoding = "gzip"
+        blob.upload_from_string(compressed_data, content_type="application/json")
+
+        # Copy the blob to recent_proof
+        recent_proof_blob = bucket.blob("recent_proof")
+        recent_proof_blob.content_encoding = "gzip"
+        bucket.copy_blob(blob, bucket, "recent_proof")
+
+        logger.debug(f"Successfully uploaded compressed proof to GCS: {filename}")
+        logger.debug(f"Successfully copied compressed proof to recent_proof")
         return True
 
     except Exception as e:
@@ -153,7 +164,17 @@ def build_recent_proof(
     fast_data_generation: bool = True,
     max_height: Optional[int] = None,
 ) -> bool:
-    """Main function to build a proof for the most recent Bitcoin block."""
+    """Main function to build a proof for the most recent Bitcoin block.
+
+    Args:
+        start_height: Starting block height (auto-detected if None)
+        max_step: Maximum number of blocks to process in each step
+        fast_data_generation: Whether to use fast data generation mode
+        max_height: Maximum block height to process (uses latest if None)
+    """
+    proof_file = None
+    proof_dir = None
+
     try:
         latest_height = get_latest_block_height()
 
@@ -183,9 +204,9 @@ def build_recent_proof(
         # Determine the actual end height
         end_height = max_height if max_height is not None else latest_height
 
-        if start_height >= end_height:
+        if start_height > end_height:
             logger.error(
-                f"Start height ({start_height}) must be less than end height ({end_height})"
+                f"Start height ({start_height}) must be less than or equal to end height ({end_height})"
             )
             return False
 
@@ -214,10 +235,19 @@ def build_recent_proof(
             logger.error("Failed to generate proof")
             return False
 
+        # Store the proof directory for potential cleanup
+        proof_dir = proof_file.parent
+
         # Convert proof from Cairo-serde format to JSON format
         json_proof_file = convert_proof_to_json(proof_file)
         if json_proof_file is None:
             logger.error("Failed to convert proof to JSON format")
+            return False
+
+        # Compress the JSON proof file
+        compressed_proof_file = compress_proof_data(json_proof_file)
+        if compressed_proof_file is None:
+            logger.error("Failed to compress proof data")
             return False
 
         from generate_data import generate_data
@@ -227,21 +257,22 @@ def build_recent_proof(
             initial_height=start_height + blocks_to_process - 1,
             num_blocks=1,
             fast=fast_data_generation,
+            mmr_roots=False,
         )
         chainstate_data = data["expected"]
-        mmr_roots = data["mmr_roots"]
 
-        upload_success = upload_to_gcs(json_proof_file, chainstate_data, mmr_roots)
+        upload_success = upload_to_gcs(compressed_proof_file, chainstate_data)
         if not upload_success:
             logger.error("Failed to upload proof to GCS")
             return False
 
-        # Clean up the temporary JSON proof file
+        # Clean up the temporary files
         try:
             json_proof_file.unlink()
+            compressed_proof_file.unlink()
         except Exception as e:
             logger.warning(
-                f"Failed to clean up temporary JSON proof file {json_proof_file}: {e}"
+                f"Failed to clean up temporary files {json_proof_file} or {compressed_proof_file}: {e}"
             )
 
         logger.info(
@@ -252,6 +283,19 @@ def build_recent_proof(
     except Exception as e:
         logger.error(f"Error in build_recent_proof: {e}")
         logger.error(traceback.format_exc())
+
+        # Clean up the proof directory if it exists
+        if proof_dir is not None and proof_dir.exists():
+            try:
+                import shutil
+
+                shutil.rmtree(proof_dir)
+                logger.debug(f"Cleaned up proof directory: {proof_dir}")
+            except Exception as cleanup_error:
+                logger.error(
+                    f"Failed to clean up proof directory {proof_dir}: {cleanup_error}"
+                )
+
         return False
 
 
@@ -296,8 +340,6 @@ if __name__ == "__main__":
     )
 
     if success:
-        logger.info("Proof building completed successfully")
         exit(0)
     else:
-        logger.error("Proof building failed")
         exit(1)
