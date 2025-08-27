@@ -5,6 +5,7 @@ use tracing::{error, info, subscriber::set_global_default};
 use tracing_subscriber::filter::EnvFilter;
 
 mod fetch;
+mod format;
 mod proof;
 mod verify;
 mod work;
@@ -53,7 +54,7 @@ async fn main() {
 
     match res {
         Ok(_) => {
-            info!("Raito client has exited successfully");
+            info!("Raito client has exited without errors");
             std::process::exit(0);
         }
         Err(err) => {

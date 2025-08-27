@@ -41,3 +41,4 @@ corelib
 *.txt
 client.errors.log
 cairo_project.toml
+*.bin

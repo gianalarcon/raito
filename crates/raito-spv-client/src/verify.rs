@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use stwo_prover::core::vcs::blake2_merkle::{Blake2sMerkleChannel, Blake2sMerkleHasher};
 use tracing::info;
 
+use crate::format::{format_transaction, FormatConfig};
 use crate::proof::{BootloaderOutput, ChainState, CompressedSpvProof, TaskResult};
 use crate::work::verify_subchain_work;
 
@@ -103,6 +104,13 @@ pub async fn verify_proof(
 
     info!("Verifying subchain work ...");
     verify_subchain_work(block_height, &chain_state, &config)?;
+
+    info!("Verification successful!");
+
+    // Format and display the transaction with ASCII graphics
+    let format_config = FormatConfig::default();
+    let formatted_tx = format_transaction(&transaction, &format_config);
+    println!("{}", formatted_tx);
 
     Ok(())
 }

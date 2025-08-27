@@ -155,7 +155,7 @@ pub async fn fetch_compressed_proof(
 pub async fn fetch_chain_state_proof(
     raito_rpc_url: &str,
 ) -> Result<ChainStateProof, anyhow::Error> {
-    info!("Fetching chain state proof");
+    info!("Fetching latest chain state proof ...");
     let url = format!("{}/chainstate-proof/recent_proof", raito_rpc_url);
     let client = reqwest::Client::new();
     let response = client
@@ -179,7 +179,7 @@ pub async fn fetch_transaction_proof(
     bitcoin_rpc_url: String,
     bitcoin_rpc_userpwd: Option<String>,
 ) -> Result<TransactionInclusionProof, anyhow::Error> {
-    info!("Fetching transaction proof for {}", txid);
+    info!("Fetching transaction proof for {} ...", txid);
     let bitcoin_client = BitcoinClient::new(bitcoin_rpc_url, bitcoin_rpc_userpwd)?;
     let MerkleBlock { header, txn } = bitcoin_client
         .get_transaction_inclusion_proof(&txid)
@@ -239,7 +239,7 @@ pub async fn fetch_block_proof(
         ));
     }
 
-    info!("Fetching block proof for block height {}", block_height);
+    info!("Fetching block proof for block height {} ...", block_height);
     let response = reqwest::get(url).await?;
     match response.error_for_status() {
         Ok(res) => Ok(res.json().await?),
